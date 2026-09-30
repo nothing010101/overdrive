@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { GameComponentProps } from "@rarefriends/friendsdk/runtime";
 import { GameMenu } from "@rarefriends/friendsdk/frame";
 import { formatGameAmount } from "@rarefriends/friendsdk/ui";
-import { maximumPrize, type GameSnapshot, type GamePlay } from "@rarefriends/friendsdk/game";
+import { maximumPrize, RF, type GameSnapshot, type GamePlay } from "@rarefriends/friendsdk/game";
 import { createFriendReader, spriteFrame } from "@rarefriends/friendsdk/sprites";
 import { createFriendSoundKit, type FriendSoundKit, type FriendSoundCue } from "@rarefriends/friendsdk/sounds";
 import "@rarefriends/friendsdk/frame.css";
@@ -13,12 +13,17 @@ import "./style.css";
 const W = 960, H = 640, RUN = 75;
 type Face = "left" | "right" | "up" | "down";
 type Up = "rate" | "multi" | "speed" | "magnet" | "pierce" | "nova" | "repair";
-type E = { x: number; y: number; vx: number; vy: number; hp: number; r: number; k: number; life: number; c: string; s: number };
+type Weapon = "blaster" | "scatter" | "lance" | "orbiter";
+type Perk = "hull" | "thruster" | "coil" | "core";
+type E = { x: number; y: number; vx: number; vy: number; hp: number; r: number; k: number; life: number; c: string; s: number; hit: number; age: number; ph: number };
+type Warn = { x: number; y: number; t: number; k: number };
 type Sprites = Awaited<ReturnType<ReturnType<typeof createFriendReader>["read"]>>;
 type Summary = { score: number; kills: number; time: number; level: number; cleared: boolean };
 type Hooks = { paused: () => boolean; reduced: () => boolean; onLevel: (choices: Up[]) => void; onEnd: (summary: Summary) => void; cue: (cue: FriendSoundCue) => void };
 type Menu = "odds" | "inventory" | "settings" | null;
-type Phase = "menu" | "play" | "levelup" | "chest" | "reveal";
+type Phase = "menu" | "armory" | "pilot" | "play" | "levelup" | "chest" | "reveal";
+type Loadout = { weapon: Weapon; perks: Record<Perk, number> };
+type Stats = { runs: number; kills: number; best: number; bestRank: string; rfSpent: bigint; rfEarned: bigint; caches: bigint };
 
 const UPS: Record<Up, [string, string]> = {
   rate: ["Overclock", "Fire 25% faster"],
@@ -29,6 +34,25 @@ const UPS: Record<Up, [string, string]> = {
   nova: ["Pulse nova", "Rings of energy blast nearby foes"],
   repair: ["Patch", "Restore 40 HP"],
 };
+
+const WEAPONS: Record<Weapon, { name: string; blurb: string; price: bigint; rate: number; shots: number; spread: number; speed: number; pierce: number; orbs: number; tint: string }> = {
+  blaster: { name: "Blaster", blurb: "Balanced single shot", price: 0n, rate: 0.42, shots: 1, spread: 0, speed: 560, pierce: 0, orbs: 0, tint: "#fff2c4" },
+  scatter: { name: "Scatter", blurb: "Three pellets in a wide arc", price: 4n * RF, rate: 0.60, shots: 3, spread: 0.30, speed: 470, pierce: 0, orbs: 0, tint: "#ffd9a0" },
+  lance: { name: "Lance", blurb: "Fast beam that pierces two foes", price: 5n * RF, rate: 0.80, shots: 1, spread: 0, speed: 900, pierce: 2, orbs: 0, tint: "#bffcf2" },
+  orbiter: { name: "Orbiter", blurb: "Twin drones circle you and burn on contact", price: 7n * RF, rate: 0.50, shots: 1, spread: 0, speed: 520, pierce: 0, orbs: 2, tint: "#9ef7ff" },
+};
+
+const PERKS: Record<Perk, { name: string; blurb: string; price: bigint; max: number }> = {
+  hull: { name: "Hull plating", blurb: "+25 max HP per level", price: 2n * RF, max: 4 },
+  thruster: { name: "Thruster", blurb: "+8% move speed per level", price: 2n * RF, max: 4 },
+  coil: { name: "Magnet coil", blurb: "+35 pickup range per level", price: 2n * RF, max: 4 },
+  core: { name: "Power core", blurb: "+12% fire rate per level", price: 3n * RF, max: 4 },
+};
+
+const PERK_IDS = Object.keys(PERKS) as Perk[];
+const WEAPON_IDS = Object.keys(WEAPONS) as Weapon[];
+const emptyPerks = (): Record<Perk, number> => ({ hull: 0, thruster: 0, coil: 0, core: 0 });
+
 const rf = (value: bigint) => `${formatGameAmount(value, 18)} RF`;
 const rankOf = (score: number) => (score >= 2000 ? "S" : score >= 1300 ? "A" : score >= 700 ? "B" : "C");
 
@@ -43,17 +67,24 @@ function seeded(seed: number) {
   };
 }
 
-function engine(canvas: HTMLCanvasElement, readSprites: () => Sprites | null, seed: number, hooks: Hooks) {
+function engine(canvas: HTMLCanvasElement, readSprites: () => Sprites | null, seed: number, loadout: Loadout, hooks: Hooks) {
   const ctx = canvas.getContext("2d")!;
   const rnd = seeded(seed);
+  const weapon = WEAPONS[loadout.weapon];
   const keys = new Set<string>();
   const ptr = { x: 0, y: 0, on: false };
-  const p = { x: W / 2, y: H / 2, hp: 100, face: "down" as Face, walk: false, inv: 0, fire: 0, nova: 2, xp: 0, need: 5, lvl: 1, rate: 0.5, multi: 1, speed: 215, magnet: 80, pierce: 0, novaLv: 0 };
+  const maxHp = 100 + loadout.perks.hull * 25;
+  const p = { x: W / 2, y: H / 2, hp: maxHp, face: "down" as Face, walk: false, inv: 0, fire: 0, nova: 2, xp: 0, need: 5, lvl: 1,
+    rate: weapon.rate / (1 + 0.12 * loadout.perks.core), multi: 1, speed: 215 * (1 + 0.08 * loadout.perks.thruster),
+    magnet: 110 + loadout.perks.coil * 35, pierce: 0, novaLv: 0 };
   const enemies: E[] = [], shots: E[] = [], shards: E[] = [], parts: E[] = [];
   const rings: { x: number; y: number; r: number; max: number }[] = [];
+  const warns: Warn[] = [];
   const hits = new WeakMap<E, Set<E>>();
+  const orbHits = new WeakMap<E, number>();
   const cache = new Map<string, HTMLCanvasElement>();
   let t = 0, kills = 0, spawn = 0.6, shake = 0, flash = 0, waiting = false, over = false, last = 0, raf = 0;
+  let warned = false, lowHp = false;
   const vignette = ctx.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, H * 0.85);
   vignette.addColorStop(0, "rgba(0,0,0,0)");
   vignette.addColorStop(1, "rgba(0,0,0,.72)");
@@ -62,8 +93,6 @@ function engine(canvas: HTMLCanvasElement, readSprites: () => Sprites | null, se
   const sprite = (face: Face, walk: boolean, index: number) => {
     const key = `${face}${walk}${index}`;
     let c = cache.get(key);
-    // Artwork arrives asynchronously; re-check every frame so a slow sprite read
-    // upgrades the placeholder to the real Friend instead of freezing it out.
     const sprites = c ? null : readSprites();
     if (!c && sprites) {
       c = document.createElement("canvas"); c.width = 16; c.height = 16;
@@ -81,22 +110,31 @@ function engine(canvas: HTMLCanvasElement, readSprites: () => Sprites | null, se
     const count = hooks.reduced() ? Math.ceil(n / 3) : n;
     for (let i = 0; i < count; i++) {
       const a = Math.random() * Math.PI * 2, v = speed * (0.3 + Math.random() * 0.7);
-      parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, hp: 0, r: 1 + Math.random() * 2.4, k: 0, life: 0.35 + Math.random() * 0.4, c, s: 0 });
+      parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, hp: 0, r: 1 + Math.random() * 2.4, k: 0, life: 0.35 + Math.random() * 0.4, c, s: 0, hit: 0, age: 0, ph: 0 });
     }
   };
 
-  const spawnEnemy = () => {
+  const kindOf = (roll: number) => (t > 20 && roll < 0.14 ? 2 : t > 10 && roll < 0.42 ? 1 : 0);
+
+  const queueSpawn = () => {
     const side = Math.floor(rnd() * 4), u = rnd(), roll = rnd();
     const x = side === 0 ? -24 : side === 1 ? W + 24 : u * W, y = side === 2 ? -24 : side === 3 ? H + 24 : u * H;
-    const k = t > 20 && roll < 0.14 ? 2 : t > 10 && roll < 0.42 ? 1 : 0;
+    warns.push({ x, y, t: 0.55, k: kindOf(roll) });
+  };
+
+  const hatch = (w: Warn) => {
+    const k = w.k;
     const hp = k === 2 ? 12 + Math.floor(t / 5) : 2 + Math.floor(t / (k ? 30 : 25));
     const s = k === 2 ? 48 : k === 1 ? 135 : 68 + t * 0.6;
-    enemies.push({ x, y, vx: 0, vy: 0, hp, r: k === 2 ? 20 : k === 1 ? 9 : 11, k, life: 0, c: k === 2 ? "#b48cff" : k === 1 ? "#ffb454" : "#ff5c8a", s });
+    enemies.push({ x: w.x, y: w.y, vx: 0, vy: 0, hp, r: k === 2 ? 21 : k === 1 ? 10 : 13, k,
+      life: 0, c: k === 2 ? "#b48cff" : k === 1 ? "#ffb454" : "#ff5c8a", s, hit: 0, age: 0, ph: Math.random() * 6.28 });
+    burst(w.x, w.y, 8, k === 2 ? "#b48cff" : k === 1 ? "#ffb454" : "#ff5c8a", 150);
   };
 
   const finish = (cleared: boolean) => {
     over = true;
     const time = Math.min(t, RUN);
+    hooks.cue(cleared ? "action-ready" : "impact");
     hooks.onEnd({ score: kills * 10 + Math.floor(time) * 5 + p.lvl * 25 + (cleared ? 300 : 0), kills, time, level: p.lvl, cleared });
   };
 
@@ -111,7 +149,7 @@ function engine(canvas: HTMLCanvasElement, readSprites: () => Sprites | null, se
   const kill = (e: E) => {
     kills++;
     const drops = e.k === 2 ? 3 : 1;
-    for (let i = 0; i < drops; i++) shards.push({ x: e.x + (Math.random() - 0.5) * 16, y: e.y + (Math.random() - 0.5) * 16, vx: 0, vy: 0, hp: 0, r: 4, k: 0, life: 0, c: "#5ee7d0", s: 0 });
+    for (let i = 0; i < drops; i++) shards.push({ x: e.x + (Math.random() - 0.5) * 16, y: e.y + (Math.random() - 0.5) * 16, vx: 0, vy: 0, hp: 0, r: 4, k: 0, life: 0, c: "#5ee7d0", s: 0, hit: 0, age: 0, ph: Math.random() * 6.28 });
     burst(e.x, e.y, e.k === 2 ? 26 : 12, e.c, 240);
     shake = Math.min(shake + (e.k === 2 ? 7 : 1.6), 12);
   };
@@ -133,18 +171,36 @@ function engine(canvas: HTMLCanvasElement, readSprites: () => Sprites | null, se
     }
     p.inv = Math.max(0, p.inv - dt); flash = Math.max(0, flash - dt);
     spawn -= dt;
-    if (spawn <= 0) { spawn = Math.max(0.2, 0.95 - t * 0.0105); for (let i = 0; i < (t > 38 ? 2 : 1); i++) spawnEnemy(); }
+    if (spawn <= 0) { spawn = Math.max(0.2, 0.95 - t * 0.0105); for (let i = 0; i < (t > 38 ? 2 : 1); i++) queueSpawn(); }
+    for (let i = warns.length - 1; i >= 0; i--) { warns[i].t -= dt; if (warns[i].t <= 0) { hatch(warns[i]); warns.splice(i, 1); } }
+
+    // Tension cues, each fired once.
+    if (!warned && RUN - t <= 10) { warned = true; hooks.cue("anticipation"); }
+    if (!lowHp && p.hp <= maxHp * 0.3) { lowHp = true; hooks.cue("anticipation"); }
+
     p.fire -= dt;
     if (p.fire <= 0 && enemies.length) {
-      let best: E | null = null, bd = 420;
+      let best: E | null = null, bd = 460;
       for (const e of enemies) { const d = Math.hypot(e.x - p.x, e.y - p.y); if (d < bd) { bd = d; best = e; } }
       if (best) {
         p.fire = p.rate;
         const base = Math.atan2(best.y - p.y, best.x - p.x);
-        for (let i = 0; i < p.multi; i++) {
-          const a = base + (i - (p.multi - 1) / 2) * 0.17;
-          shots.push({ x: p.x, y: p.y, vx: Math.cos(a) * 560, vy: Math.sin(a) * 560, hp: p.pierce, r: 4, k: 0, life: 0.9, c: "#fff2c4", s: 0 });
+        const count = weapon.shots + p.multi - 1;
+        const step = weapon.shots > 1 ? weapon.spread : 0.17;
+        for (let i = 0; i < count; i++) {
+          const a = base + (i - (count - 1) / 2) * step;
+          shots.push({ x: p.x, y: p.y, vx: Math.cos(a) * weapon.speed, vy: Math.sin(a) * weapon.speed,
+            hp: weapon.pierce + p.pierce, r: weapon.shots > 1 ? 3.4 : 4.4, k: 0, life: 0.9, c: weapon.tint, s: 0, hit: 0, age: 0, ph: 0 });
         }
+      }
+    }
+    // Orbiter drones burn anything they sweep through.
+    for (let i = 0; i < weapon.orbs; i++) {
+      const a = t / 0.7 + i * Math.PI, ox = p.x + Math.cos(a) * 62, oy = p.y + Math.sin(a) * 62;
+      for (const e of enemies) {
+        if (Math.hypot(e.x - ox, e.y - oy) > e.r + 11) continue;
+        if (t - (orbHits.get(e) ?? -9) < 0.4) continue;
+        orbHits.set(e, t); e.hp -= 1; e.hit = 0.12; burst(ox, oy, 3, "#9ef7ff", 130);
       }
     }
     if (p.novaLv > 0) {
@@ -153,7 +209,7 @@ function engine(canvas: HTMLCanvasElement, readSprites: () => Sprites | null, se
         p.nova = Math.max(2.4, 4.6 - p.novaLv * 0.45);
         const max = 100 + p.novaLv * 32;
         rings.push({ x: p.x, y: p.y, r: 0, max });
-        for (const e of enemies) if (Math.hypot(e.x - p.x, e.y - p.y) < max + e.r) e.hp -= 2 * p.novaLv;
+        for (const e of enemies) if (Math.hypot(e.x - p.x, e.y - p.y) < max + e.r) { e.hp -= 2 * p.novaLv; e.hit = 0.12; }
       }
     }
     for (const r of rings) r.r += (r.max - r.r) * Math.min(1, dt * 7) + dt * 40;
@@ -165,26 +221,30 @@ function engine(canvas: HTMLCanvasElement, readSprites: () => Sprites | null, se
         const seen = hits.get(s) ?? new Set<E>();
         if (seen.has(e)) continue;
         seen.add(e); hits.set(s, seen);
-        e.hp -= 1; e.vx += s.vx * 0.05; e.vy += s.vy * 0.05;
+        e.hp -= 1; e.hit = 0.12; e.vx += s.vx * 0.05; e.vy += s.vy * 0.05;
         burst(s.x, s.y, 4, "#bffcf2", 160);
         if (s.hp-- <= 0) { s.life = 0; break; }
       }
     }
     for (const e of enemies) {
+      e.age += dt; e.hit = Math.max(0, e.hit - dt);
       const ax = p.x - e.x, ay = p.y - e.y, d = Math.hypot(ax, ay) || 1;
       e.vx += (ax / d * e.s - e.vx) * Math.min(1, dt * 5); e.vy += (ay / d * e.s - e.vy) * Math.min(1, dt * 5);
       e.x += e.vx * dt; e.y += e.vy * dt;
       if (p.inv <= 0 && d < e.r + 13) {
         p.hp -= e.k === 2 ? 16 : 9; p.inv = 0.7; flash = 0.25; shake = Math.min(shake + 8, 14);
+        hooks.cue("impact");
         burst(p.x, p.y, 18, "#ff6b7a", 260);
       }
     }
     for (let i = enemies.length - 1; i >= 0; i--) if (enemies[i].hp <= 0) { kill(enemies[i]); enemies.splice(i, 1); }
     for (let i = shots.length - 1; i >= 0; i--) if (shots[i].life <= 0) shots.splice(i, 1);
+    // Shards drift toward the Friend from anywhere, then snap in close.
     for (let i = shards.length - 1; i >= 0; i--) {
       const s = shards[i], ax = p.x - s.x, ay = p.y - s.y, d = Math.hypot(ax, ay) || 1;
-      if (d < p.magnet) { s.x += ax / d * 420 * dt; s.y += ay / d * 420 * dt; }
-      if (d < 18) { shards.splice(i, 1); p.xp++; }
+      const pull = d < p.magnet ? 430 : 70;
+      s.x += ax / d * pull * dt; s.y += ay / d * pull * dt;
+      if (d < 20) { shards.splice(i, 1); p.xp++; }
     }
     for (const q of parts) { q.x += q.vx * dt; q.y += q.vy * dt; q.vx *= 0.94; q.vy *= 0.94; q.life -= dt; }
     for (let i = parts.length - 1; i >= 0; i--) if (parts[i].life <= 0) parts.splice(i, 1);
@@ -197,6 +257,74 @@ function engine(canvas: HTMLCanvasElement, readSprites: () => Sprites | null, se
     ctx.beginPath();
     for (let i = 0; i < n; i++) { const a = rot + (i / n) * Math.PI * 2; ctx.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r); }
     ctx.closePath();
+  };
+
+  /**
+   * Each foe is a drawn creature, not a bare polygon. The silhouette is filled dark
+   * and rimmed in neon so it still reads as a creature at ~26px on a phone, and the
+   * eyes are oversized and glowing because that is what sells "alive" at small sizes.
+   */
+  const drawFoe = (e: E, now: number) => {
+    const hit = e.hit > 0;
+    const line = hit ? "#ffffff" : e.c;
+    ctx.save();
+    ctx.translate(e.x, e.y);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+
+    if (e.k === 0) {
+      // Crawler: pulsing body, six skittering legs, two glowing eyes.
+      ctx.rotate(now / 900 + e.ph);
+      const stretch = 1 + Math.sin(now / 150 + e.ph) * 0.09;
+      ctx.beginPath(); ctx.ellipse(0, 0, e.r * stretch, e.r / stretch, 0, 0, Math.PI * 2);
+      ctx.fillStyle = hit ? "#ffffff" : "#2b0d1b";
+      ctx.fill();
+      ctx.shadowColor = e.c; ctx.shadowBlur = 10;
+      ctx.strokeStyle = line; ctx.lineWidth = 2.4; ctx.stroke();
+      ctx.lineWidth = 2.2;
+      for (const side of [-1, 1]) for (let i = 0; i < 3; i++) {
+        const lx = -e.r * 0.62 + i * e.r * 0.62, ly = side * e.r * 0.66;
+        const kick = Math.sin(now / 85 + i * 1.7 + (side > 0 ? 0.9 : 0)) * e.r * 0.42;
+        ctx.beginPath(); ctx.moveTo(lx, ly * 0.5); ctx.lineTo(lx + kick, ly * 1.75); ctx.stroke();
+      }
+      ctx.shadowBlur = 9; ctx.fillStyle = hit ? "#ffffff" : "#fff1f6";
+      for (const side of [-1, 1]) { ctx.beginPath(); ctx.arc(e.r * 0.3, side * e.r * 0.36, e.r * 0.23, 0, Math.PI * 2); ctx.fill(); }
+      ctx.shadowBlur = 0; ctx.fillStyle = "#12040b";
+      for (const side of [-1, 1]) { ctx.beginPath(); ctx.arc(e.r * 0.36, side * e.r * 0.36, e.r * 0.1, 0, Math.PI * 2); ctx.fill(); }
+    } else if (e.k === 1) {
+      // Darter: dark dart rimmed in neon, nose to velocity, fading motion tail.
+      ctx.rotate(Math.atan2(e.vy, e.vx));
+      ctx.strokeStyle = line; ctx.lineWidth = 2.4;
+      for (let i = 1; i <= 3; i++) {
+        ctx.globalAlpha = 0.55 - i * 0.14;
+        ctx.beginPath(); ctx.moveTo(-e.r * (1 + i * 0.9), 0); ctx.lineTo(-e.r * (0.55 + i * 0.9), 0); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      ctx.beginPath(); ctx.moveTo(e.r * 1.9, 0); ctx.lineTo(-e.r * 0.9, e.r * 1.0); ctx.lineTo(-e.r * 0.25, 0); ctx.lineTo(-e.r * 0.9, -e.r * 1.0); ctx.closePath();
+      ctx.fillStyle = hit ? "#ffffff" : "#2e1804"; ctx.fill();
+      ctx.shadowColor = e.c; ctx.shadowBlur = 10; ctx.stroke();
+      ctx.shadowBlur = 9; ctx.fillStyle = hit ? "#ffffff" : "#fff4e0";
+      ctx.beginPath(); ctx.arc(e.r * 0.55, 0, e.r * 0.3, 0, Math.PI * 2); ctx.fill();
+    } else {
+      // Brute: armoured hexagon, rotating plates and a pulsing core.
+      const spin = now / 1400 + e.ph;
+      ctx.beginPath(); ctx.ellipse(0, 0, e.r, e.r * 0.94, 0, 0, Math.PI * 2);
+      ctx.fillStyle = hit ? "#ffffff" : "#1d1436"; ctx.fill();
+      ctx.shadowColor = e.c; ctx.shadowBlur = 12;
+      ctx.strokeStyle = line; ctx.lineWidth = 3; ctx.stroke();
+      ctx.shadowBlur = 0;
+      for (let i = 0; i < 3; i++) {
+        const a = spin + i * (Math.PI * 2 / 3);
+        ctx.beginPath(); ctx.moveTo(Math.cos(a) * e.r * 0.9, Math.sin(a) * e.r * 0.9);
+        ctx.lineTo(Math.cos(a) * e.r * 1.42, Math.sin(a) * e.r * 1.42); ctx.stroke();
+      }
+      poly(0, 0, e.r * 0.62, 6, spin); ctx.lineWidth = 2; ctx.stroke();
+      const pulse = 0.5 + Math.sin(now / 220 + e.ph) * 0.5;
+      ctx.shadowColor = e.c; ctx.shadowBlur = 14;
+      ctx.fillStyle = hit ? "#ffffff" : "#ffd9ff";
+      ctx.beginPath(); ctx.arc(0, 0, e.r * (0.2 + pulse * 0.13), 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
   };
 
   const draw = (now: number) => {
@@ -215,13 +343,20 @@ function engine(canvas: HTMLCanvasElement, readSprites: () => Sprites | null, se
     for (const s of shards) { ctx.fillStyle = "#5ee7d0"; ctx.shadowColor = "#5ee7d0"; ctx.shadowBlur = 12; poly(s.x, s.y, 5 + Math.sin(now / 160 + s.x) * 1.2, 4, Math.PI / 4); ctx.fill(); }
     ctx.shadowBlur = 0;
     for (const r of rings) { ctx.strokeStyle = `rgba(216,178,106,${0.8 * (1 - r.r / r.max)})`; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(r.x, r.y, r.r, 0, Math.PI * 2); ctx.stroke(); }
-    for (const e of enemies) {
-      ctx.fillStyle = e.c; ctx.shadowColor = e.c; ctx.shadowBlur = 16;
-      const rot = e.k === 1 ? Math.atan2(e.vy, e.vx) : now / 600;
-      poly(e.x, e.y, e.r, e.k === 2 ? 6 : e.k === 1 ? 3 : 4, rot); ctx.globalAlpha = 0.9; ctx.fill(); ctx.globalAlpha = 1;
-      ctx.fillStyle = "#07080c"; ctx.shadowBlur = 0; ctx.beginPath(); ctx.arc(e.x, e.y, e.r * 0.32, 0, Math.PI * 2); ctx.fill();
+    for (const w of warns) {
+      const k = 1 - w.t / 0.55, c = w.k === 2 ? "180,140,255" : w.k === 1 ? "255,180,84" : "255,92,138";
+      ctx.strokeStyle = `rgba(${c},${0.35 + k * 0.5})`; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(w.x, w.y, 34 * (1 - k) + 10, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(w.x, w.y, 10 * k, 0, Math.PI * 2); ctx.stroke();
     }
-    for (const s of shots) { ctx.fillStyle = s.c; ctx.shadowColor = "#fff2c4"; ctx.shadowBlur = 14; ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill(); }
+    for (const e of enemies) drawFoe(e, now);
+    ctx.globalCompositeOperation = "lighter";
+    for (const s of shots) { ctx.fillStyle = s.c; ctx.shadowColor = s.c; ctx.shadowBlur = 14; ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill(); }
+    for (let i = 0; i < weapon.orbs; i++) {
+      const a = t / 0.7 + i * Math.PI, o = 62;
+      ctx.fillStyle = "#9ef7ff"; ctx.shadowColor = "#9ef7ff"; ctx.shadowBlur = 20;
+      ctx.beginPath(); ctx.arc(p.x + Math.cos(a) * o, p.y + Math.sin(a) * o, 7, 0, Math.PI * 2); ctx.fill();
+    }
     for (const q of parts) { ctx.globalAlpha = Math.max(0, q.life * 2); ctx.fillStyle = q.c; ctx.fillRect(q.x, q.y, q.r, q.r); }
     ctx.globalAlpha = 1; ctx.shadowBlur = 0;
     ctx.globalCompositeOperation = "source-over";
@@ -239,13 +374,16 @@ function engine(canvas: HTMLCanvasElement, readSprites: () => Sprites | null, se
     ctx.fillStyle = "rgba(238,242,247,.14)"; ctx.fillRect(0, 0, W, 6);
     ctx.fillStyle = "#5ee7d0"; ctx.fillRect(0, 0, W * Math.min(1, p.xp / p.need), 6);
     ctx.fillStyle = "rgba(10,12,18,.7)"; ctx.fillRect(22, 22, 264, 22);
-    ctx.fillStyle = p.hp > 35 ? "#d8b26a" : "#ff6b7a"; ctx.fillRect(26, 26, 256 * Math.max(0, p.hp) / 100, 14);
+    ctx.fillStyle = p.hp > maxHp * 0.35 ? "#d8b26a" : "#ff6b7a"; ctx.fillRect(26, 26, 256 * Math.max(0, p.hp) / maxHp, 14);
     const rem = Math.max(0, Math.ceil(RUN - t));
     ctx.fillStyle = "#eef2f7"; ctx.textBaseline = "top";
     ctx.textAlign = "center"; ctx.font = "700 40px ui-sans-serif,system-ui,sans-serif";
     ctx.fillText(`${Math.floor(rem / 60)}:${String(rem % 60).padStart(2, "0")}`, W / 2, 14);
     ctx.textAlign = "right"; ctx.font = "600 24px ui-sans-serif,system-ui,sans-serif";
     ctx.fillText(`LV ${p.lvl}  ·  ${kills} kills`, W - 24, 20);
+    ctx.textAlign = "left"; ctx.font = "600 13px ui-sans-serif,system-ui,sans-serif";
+    ctx.fillStyle = "rgba(216,178,106,.75)";
+    ctx.fillText(weapon.name.toUpperCase(), 26, 54);
   };
 
   const loop = (now: number) => {
@@ -275,7 +413,7 @@ function engine(canvas: HTMLCanvasElement, readSprites: () => Sprites | null, se
       else if (id === "magnet") p.magnet += 70;
       else if (id === "pierce") p.pierce++;
       else if (id === "nova") p.novaLv++;
-      else p.hp = Math.min(100, p.hp + 40);
+      else p.hp = Math.min(maxHp, p.hp + 40);
       waiting = false;
     },
     stop() {
@@ -294,13 +432,15 @@ export default function Overdrive({ friendId, client, paused }: GameComponentPro
   const [summary, setSummary] = useState<Summary | null>(null);
   const [choices, setChoices] = useState<Up[]>([]);
   const [runId, setRunId] = useState(0);
-  const [best, setBest] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [muted, setMuted] = useState(true);
+  const [muted, setMuted] = useState(false);
   const [reduced, setReduced] = useState(false);
   const [sprites, setSprites] = useState<Sprites | null>(null);
+  const [loadout, setLoadout] = useState<Loadout>({ weapon: "blaster", perks: emptyPerks() });
+  const [shopSpent, setShopSpent] = useState(0n);
+  const [stats, setStats] = useState<Stats>({ runs: 0, kills: 0, best: 0, bestRank: "—", rfSpent: 0n, rfEarned: 0n, caches: 0n });
   const canvas = useRef<HTMLCanvasElement>(null);
   const spritesRef = useRef<Sprites | null>(null);
   const core = useRef<ReturnType<typeof engine> | null>(null);
@@ -312,11 +452,17 @@ export default function Overdrive({ friendId, client, paused }: GameComponentPro
   spritesRef.current = sprites;
   const definition = client.definition;
   const day = useMemo(() => Math.floor(Date.now() / 86400000), []);
+  const available = snapshot ? snapshot.rfBalance - shopSpent : 0n;
 
   useEffect(() => {
     const version = ++epoch.current;
-    sound.current = createFriendSoundKit({ muted: true });
-    setSnapshot(null); setMenu(null); setPhase("menu"); setResult(null); setError(""); setMessage(""); setBusy(false); setMuted(true); setSprites(null); locked.current = false;
+    // Audio starts enabled: a muted kit never allocates an AudioContext at all,
+    // so the default has to be on or the game is silent forever.
+    sound.current = createFriendSoundKit({ muted: false });
+    const wake = () => { void sound.current?.unlock(); };
+    window.addEventListener("pointerdown", wake, { once: true, capture: true });
+    window.addEventListener("keydown", wake, { once: true, capture: true });
+    setSnapshot(null); setMenu(null); setPhase("menu"); setResult(null); setError(""); setMessage(""); setBusy(false); setMuted(false); setSprites(null); locked.current = false;
     void client.read().then(value => { if (version === epoch.current) setSnapshot(value); })
       .catch(cause => { if (version === epoch.current) setError(cause instanceof Error ? cause.message : "Could not load the preview."); });
     void createFriendReader().read(friendId).then(value => { if (version === epoch.current) setSprites(value); }).catch(() => undefined);
@@ -324,23 +470,39 @@ export default function Overdrive({ friendId, client, paused }: GameComponentPro
     const update = () => setReduced(preference.matches);
     update();
     preference.addEventListener("change", update);
-    return () => { epoch.current++; core.current?.stop(); core.current = null; sound.current?.dispose(); sound.current = null; preference.removeEventListener("change", update); };
+    return () => {
+      epoch.current++; core.current?.stop(); core.current = null;
+      sound.current?.dispose(); sound.current = null;
+      window.removeEventListener("pointerdown", wake, { capture: true } as EventListenerOptions);
+      window.removeEventListener("keydown", wake, { capture: true } as EventListenerOptions);
+      preference.removeEventListener("change", update);
+    };
   }, [client, friendId]);
 
   useEffect(() => {
     if (!runId || !canvas.current) return;
-    const game = engine(canvas.current, () => spritesRef.current, day * 2654435761 + runId, {
+    const game = engine(canvas.current, () => spritesRef.current, day * 2654435761 + runId, loadout, {
       paused: () => live.current.paused,
       reduced: () => live.current.reduced,
       cue: cue => sound.current?.play(cue),
       onLevel: list => { setChoices(list); setPhase("levelup"); },
-      onEnd: done => { setSummary(done); setBest(value => Math.max(value, done.score)); setPhase("chest"); },
+      onEnd: done => {
+        setSummary(done);
+        setPhase("chest");
+        setStats(prev => ({
+          ...prev,
+          runs: prev.runs + 1,
+          kills: prev.kills + done.kills,
+          best: Math.max(prev.best, done.score),
+          bestRank: done.score > prev.best ? rankOf(done.score) : prev.bestRank,
+        }));
+      },
     });
     core.current = game;
     return () => { game.stop(); core.current = null; };
   }, [runId]);
 
-  const choose = (id: Up) => { core.current?.pick(id); setPhase("play"); };
+  const choose = (id: Up) => { sound.current?.play("select"); core.current?.pick(id); setPhase("play"); };
 
   useEffect(() => {
     if (phase !== "levelup") return;
@@ -364,6 +526,33 @@ export default function Overdrive({ friendId, client, paused }: GameComponentPro
     }
   }
 
+  const buyWeapon = (id: Weapon) => {
+    const price = WEAPONS[id].price;
+    if (loadout.weapon === id || price > available) return;
+    sound.current?.play("purchase");
+    setShopSpent(s => s + price);
+    setLoadout(prev => ({ ...prev, weapon: id }));
+    setStats(prev => ({ ...prev, rfSpent: prev.rfSpent + price }));
+    setMessage(`${WEAPONS[id].name} installed. Simulated ${rf(price)} spend.`);
+  };
+
+  const buyPerk = (id: Perk) => {
+    const perk = PERKS[id], level = loadout.perks[id];
+    if (level >= perk.max || perk.price > available) return;
+    sound.current?.play("purchase");
+    setShopSpent(s => s + perk.price);
+    setLoadout(prev => ({ ...prev, perks: { ...prev.perks, [id]: level + 1 } }));
+    setStats(prev => ({ ...prev, rfSpent: prev.rfSpent + perk.price }));
+    setMessage(`${perk.name} level ${level + 1}. Simulated ${rf(perk.price)} spend.`);
+  };
+
+  const startRun = () => {
+    void sound.current?.unlock();
+    sound.current?.play("action-start");
+    setSummary(null); setResult(null); setError(""); setMessage("");
+    setPhase("play"); setRunId(value => value + 1);
+  };
+
   const feedback = <p className="od-status" role={error ? "alert" : "status"}>{error || message || (busy ? "Waiting for preview confirmation…" : "Simulated RF and outcomes. Score and rank are cosmetic and never change odds.")}</p>;
 
   if (!snapshot) return (
@@ -374,7 +563,7 @@ export default function Overdrive({ friendId, client, paused }: GameComponentPro
   if (snapshot.friendId !== friendId) return <p role="alert">This game session does not match the selected Friend.</p>;
 
   const maxPrize = maximumPrize(definition);
-  const canBuy = snapshot.rfBalance >= definition.price && snapshot.freeStake >= maxPrize && snapshot.freeStake + definition.price >= maxPrize;
+  const canBuy = available >= definition.price && snapshot.freeStake >= maxPrize && snapshot.freeStake + definition.price >= maxPrize;
   const pending = snapshot.plays.find(item => item.outcomeId === null);
   const ready = snapshot.consumables > 0n || Boolean(pending);
   const outcomeIndex = result?.outcomeId ? result.outcomeId - 1 : -1;
@@ -387,8 +576,20 @@ export default function Overdrive({ friendId, client, paused }: GameComponentPro
     const version = epoch.current;
     const opened = pending ?? (await client.play(1n))[0];
     const settled = await client.settle(opened.id);
-    if (version === epoch.current) { setResult(settled); setPhase("reveal"); }
-  }, "reveal-common");
+    if (version === epoch.current) {
+      setResult(settled);
+      setPhase("reveal");
+      setStats(prev => ({ ...prev, caches: prev.caches + 1n }));
+      const tier = settled.outcomeId ?? 1;
+      sound.current?.play(tier >= 4 ? "reveal-legendary" : tier === 3 ? "reveal-rare" : "reveal-common");
+    }
+  }, undefined);
+
+  const soundToggle = (
+    <button type="button" aria-pressed={!muted} onClick={() => { const next = !muted; setMuted(next); sound.current?.setMuted(next); if (!next) void sound.current?.unlock(); }}>
+      {muted ? "Sound: off" : "Sound: on"}
+    </button>
+  );
 
   return (
     <section className={`od-game od-rank-${rank}`} aria-label={definition.name} aria-busy={busy}>
@@ -417,20 +618,97 @@ export default function Overdrive({ friendId, client, paused }: GameComponentPro
       {phase === "menu" && (
         <div className="od-screen" inert={Boolean(menu) || undefined}>
           <header className="od-top">
-            <span className="od-chip">Preview · {rf(snapshot.rfBalance)} · {snapshot.consumables.toString()} tickets</span>
-            <button type="button" onClick={() => !busy && setMenu("odds")}>Odds</button>
-            <button type="button" onClick={() => !busy && setMenu("inventory")}>Vault · {count.toString()}</button>
-            <button type="button" onClick={() => !busy && setMenu("settings")}>Settings</button>
+            <span className="od-chip">Preview · {rf(available)} · {snapshot.consumables.toString()} tickets</span>
+            <button type="button" onClick={() => { sound.current?.play("select"); setMenu("odds"); }}>Odds</button>
+            <button type="button" onClick={() => { sound.current?.play("select"); setMenu("inventory"); }}>Vault · {count.toString()}</button>
+            <button type="button" onClick={() => { sound.current?.play("select"); setMenu("settings"); }}>Settings</button>
           </header>
           <div className="od-hero">
             <small>Daily arena #{day % 10000} · same spawns for everyone</small>
             <h1>OVERDRIVE</h1>
             <p>75 seconds. Your Rare Friend holds the line against the glitch swarm. Survive, level up, then crack the cache.</p>
-            {best > 0 && <p className="od-best">Best score this session · {best}</p>}
+            <div className="od-loadout">
+              <span className="od-slot"><b>{WEAPONS[loadout.weapon].name}</b><small>equipped weapon</small></span>
+              {PERK_IDS.map(id => (
+                <span className="od-slot" key={id}><b>{loadout.perks[id]}/{PERKS[id].max}</b><small>{PERKS[id].name}</small></span>
+              ))}
+            </div>
+            <div className="od-nav">
+              <button type="button" onClick={() => { sound.current?.play("select"); setPhase("armory"); }}>Armory</button>
+              <button type="button" onClick={() => { sound.current?.play("select"); setPhase("pilot"); }}>Pilot profile</button>
+            </div>
             {ready
-              ? <button type="button" className="od-cta" disabled={busy || paused} onClick={() => { setSummary(null); setResult(null); setError(""); setMessage(""); setPhase("play"); setRunId(value => value + 1); }}>Start run</button>
+              ? <button type="button" className="od-cta" disabled={busy || paused} onClick={startRun}>Start run</button>
               : <button type="button" className="od-cta" disabled={!canBuy || busy || paused} onClick={() => void act(() => client.buy(1n), "purchase", () => setMessage("One simulated Run Ticket added."))}>Buy Run Ticket · {rf(definition.price)}</button>}
-            {!ready && !canBuy && <p className="od-best">{snapshot.rfBalance < definition.price ? "Not enough simulated RF." : "New tickets are paused until there is enough free backing."}</p>}
+            {!ready && !canBuy && <p className="od-best">{available < definition.price ? "Not enough simulated RF." : "New tickets are paused until there is enough free backing."}</p>}
+          </div>
+          <footer className="od-foot">{feedback}</footer>
+        </div>
+      )}
+
+      {phase === "armory" && (
+        <div className="od-screen">
+          <header className="od-top">
+            <span className="od-chip">Armory · {rf(available)} available</span>
+            <button type="button" onClick={() => { sound.current?.play("select"); setPhase("menu"); }}>Back</button>
+          </header>
+          <div className="od-scroll">
+            <p className="od-note">Every purchase is a <b>simulated RF spend</b> from this preview balance. Upgrades last for this session only — the sandbox has no save API, so nothing persists across a reload.</p>
+            <h3 className="od-sub">Weapons</h3>
+            {WEAPON_IDS.map(id => {
+              const w = WEAPONS[id], owned = loadout.weapon === id, locked = w.price > available && !owned;
+              return (
+                <div className={`od-item${owned ? " od-owned" : ""}`} key={id}>
+                  <span><strong>{w.name}</strong><small>{w.blurb} · {w.price === 0n ? "free" : rf(w.price)}</small></span>
+                  <button type="button" disabled={owned || locked || busy || paused} onClick={() => buyWeapon(id)}>
+                    {owned ? "Equipped" : locked ? "Need RF" : `Install · ${rf(w.price)}`}
+                  </button>
+                </div>
+              );
+            })}
+            <h3 className="od-sub">Systems</h3>
+            {PERK_IDS.map(id => {
+              const perk = PERKS[id], level = loadout.perks[id], maxed = level >= perk.max, locked = perk.price > available;
+              return (
+                <div className={`od-item${maxed ? " od-owned" : ""}`} key={id}>
+                  <span><strong>{perk.name} · Lv {level}/{perk.max}</strong><small>{perk.blurb} · {rf(perk.price)}</small></span>
+                  <button type="button" disabled={maxed || locked || busy || paused} onClick={() => buyPerk(id)}>
+                    {maxed ? "Maxed" : locked ? "Need RF" : `Upgrade · ${rf(perk.price)}`}
+                  </button>
+                </div>
+              );
+            })}
+            <p className="od-note">Total simulated RF spent this session: <b>{rf(stats.rfSpent)}</b></p>
+          </div>
+          <footer className="od-foot">{feedback}</footer>
+        </div>
+      )}
+
+      {phase === "pilot" && (
+        <div className="od-screen">
+          <header className="od-top">
+            <span className="od-chip">Pilot · session record</span>
+            <button type="button" onClick={() => { sound.current?.play("select"); setPhase("menu"); }}>Back</button>
+          </header>
+          <div className="od-scroll">
+            <p className="od-note">Session-only: the SDK sandbox has no storage, so this record resets on reload.</p>
+            <div className="od-grid">
+              <div className="od-stat"><b>{stats.runs}</b><small>runs flown</small></div>
+              <div className="od-stat"><b>{stats.best}</b><small>best score</small></div>
+              <div className="od-stat"><b>{stats.bestRank}</b><small>best rank</small></div>
+              <div className="od-stat"><b>{stats.kills}</b><small>total kills</small></div>
+              <div className="od-stat"><b>{stats.caches.toString()}</b><small>caches cracked</small></div>
+              <div className="od-stat"><b>{rf(stats.rfEarned)}</b><small>RF redeemed</small></div>
+              <div className="od-stat"><b>{rf(stats.rfSpent)}</b><small>RF spent (shop)</small></div>
+              <div className="od-stat"><b>{WEAPONS[loadout.weapon].name}</b><small>current weapon</small></div>
+            </div>
+            <h3 className="od-sub">Equipped</h3>
+            {PERK_IDS.map(id => (
+              <div className="od-item" key={id}>
+                <span><strong>{PERKS[id].name}</strong><small>{PERKS[id].blurb}</small></span>
+                <span className="od-level">Lv {loadout.perks[id]}/{PERKS[id].max}</span>
+              </div>
+            ))}
           </div>
           <footer className="od-foot">{feedback}</footer>
         </div>
@@ -452,8 +730,11 @@ export default function Overdrive({ friendId, client, paused }: GameComponentPro
           <h2>{outcome.name}</h2>
           <p className="od-stats">{rf(outcome.reward)} · {outcome.chanceBps / 100}% chance</p>
           <div className="od-actions">
-            <button type="button" disabled={busy || paused} onClick={() => { setPhase("menu"); setResult(null); }}>Keep it</button>
-            <button type="button" className="od-cta" disabled={busy || paused} onClick={() => void act(() => client.redeem(result!.outcomeId!, 1n), "reward", () => { setPhase("menu"); setResult(null); setMessage("Redeemed in the simulated ledger."); })}>Redeem · {rf(outcome.reward)}</button>
+            <button type="button" disabled={busy || paused} onClick={() => { sound.current?.play("select"); setPhase("menu"); setResult(null); }}>Keep it</button>
+            <button type="button" className="od-cta" disabled={busy || paused} onClick={() => void act(() => client.redeem(result!.outcomeId!, 1n), "reward", () => {
+              setStats(prev => ({ ...prev, rfEarned: prev.rfEarned + outcome.reward }));
+              setPhase("menu"); setResult(null); setMessage("Redeemed in the simulated ledger.");
+            })}>Redeem · {rf(outcome.reward)}</button>
           </div>
           {feedback}
         </div>
@@ -472,16 +753,24 @@ export default function Overdrive({ friendId, client, paused }: GameComponentPro
             {definition.outcomes.map((item, index) => (
               <div className="od-item" key={item.name}>
                 <span><strong>{item.name}</strong><small>{snapshot.inventory[index].toString()} owned · {rf(item.reward)}</small></span>
-                <button type="button" disabled={busy || paused || snapshot.inventory[index] === 0n} onClick={() => void act(() => client.redeem(index + 1, 1n), "reward")}>Redeem one</button>
+                <button type="button" disabled={busy || paused || snapshot.inventory[index] === 0n} onClick={() => void act(() => client.redeem(index + 1, 1n), "reward", () => setStats(prev => ({ ...prev, rfEarned: prev.rfEarned + item.reward })))}>Redeem one</button>
               </div>
             ))}
           </> : <>
-            <button type="button" aria-pressed={!muted} onClick={() => { const next = !muted; setMuted(next); sound.current?.setMuted(next); if (!next) void sound.current?.unlock(); }}>{muted ? "Sound off" : "Sound on"}</button>
+            {soundToggle}
             <label><input type="checkbox" checked={reduced} onChange={event => setReduced(event.target.checked)} /> Reduce motion</label>
             <p>All economy actions are simulated. Reloading resets this preview. Wallet connection and ownership verification are provided by the SDK.</p>
           </>}
           {feedback}
         </GameMenu>
+      )}
+
+      {playing && (
+        <div className="od-hudbtns">
+          <button type="button" aria-label={muted ? "Unmute sound" : "Mute sound"} onClick={() => { const next = !muted; setMuted(next); sound.current?.setMuted(next); if (!next) void sound.current?.unlock(); }}>
+            {muted ? "🔇" : "🔊"}
+          </button>
+        </div>
       )}
     </section>
   );

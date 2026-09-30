@@ -41,6 +41,24 @@
 .od-table th,.od-table td{padding:8px 4px;border-bottom:1px solid rgba(128,128,128,.3)}
 .od-item{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid rgba(128,128,128,.3)}
 .od-item small{display:block;margin-top:3px}
+.od-loadout{position:relative;display:flex;flex-wrap:wrap;gap:6px;justify-content:center;max-width:560px}
+.od-slot{display:flex;flex-direction:column;align-items:center;min-width:74px;padding:6px 10px;border:1px solid rgba(216,178,106,.3);border-radius:10px;background:rgba(10,12,18,.72)}
+.od-slot b{font-size:12px;color:var(--gold)}
+.od-slot small{font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:rgba(238,242,247,.45)}
+.od-nav{position:relative;display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+.od-scroll{position:relative;flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:4px 20px 16px;text-align:left}
+.od-note{font-size:11px;line-height:1.5;color:rgba(238,242,247,.55);margin:6px 0 14px}
+.od-note b{color:var(--gold)}
+.od-sub{margin:16px 0 6px;font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--cyan)}
+.od-item.od-owned{opacity:.72}
+.od-level{font-size:12px;color:var(--gold);white-space:nowrap}
+.od-grid{position:relative;display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:6px 0 4px}
+.od-stat{display:flex;flex-direction:column;gap:2px;padding:10px;border:1px solid rgba(94,231,208,.22);border-radius:10px;background:rgba(10,12,18,.7)}
+.od-stat b{font-size:18px;color:var(--cyan);overflow:hidden;text-overflow:ellipsis}
+.od-stat small{font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:rgba(238,242,247,.45)}
+.od-hudbtns{position:absolute;top:50%;left:10px;transform:translateY(-50%);z-index:3;display:flex;flex-direction:column;gap:6px}
+.od-hudbtns button{padding:4px 8px;font-size:14px;line-height:1;border-radius:8px;opacity:.75}
+.od-hudbtns button:hover{opacity:1}
 @keyframes od-drift{to{background-position:36px 36px}}
 @keyframes od-pop{0%{transform:scale(.6);opacity:0}100%{transform:scale(1);opacity:1}}
 @media(max-width:620px){
@@ -64,5 +82,16 @@
   .od-card span{font-size:11px}
   .od-status{font-size:10px}
   .od-foot{padding:0 12px calc(8px + var(--od-safe-bottom))}
+  .od-loadout{gap:4px}
+  .od-slot{min-width:58px;padding:4px 7px}
+  .od-slot b{font-size:11px}
+  .od-slot small{font-size:8px}
+  .od-scroll{padding:4px 12px 12px}
+  .od-grid{grid-template-columns:repeat(2,1fr);gap:6px}
+  .od-stat b{font-size:15px}
+  .od-item{flex-wrap:wrap;gap:6px;padding:9px 0}
+  .od-item button{padding:7px 10px;font-size:11px}
+  .od-hudbtns{left:6px;gap:4px}
+  .od-hudbtns button{padding:3px 6px;font-size:12px}
 }
 @media(prefers-reduced-motion:reduce){.od-screen::before,.od-pop h2{animation:none}}
