@@ -40,6 +40,10 @@ A 75-second neon arena survival run where your selected Rare Friend **is** the f
   **S / A / B / C**. Score and rank are cosmetic: they only tint the reveal and
   **never** change odds or rewards.
 - **Sound** starts on, with a mute toggle on the arena HUD and in Settings.
+  Every shot, every kill, player damage, level-ups, cache tiers, the low-HP
+  warning and the final-ten-seconds cue all play, rate-limited so they stay
+  readable instead of buzzing.
+- **Phase banners** announce the three difficulty steps at 10s, 20s and 38s.
 
 ## Weapons and systems
 
@@ -47,6 +51,21 @@ Pick a weapon and buy systems in the **Armory** before a run. Everything is a
 simulated RF spend from the preview balance the runtime already shows; the game
 tracks its own spend and subtracts it from that balance. It is a game-local sink,
 not an SDK ledger action, and it resets on reload.
+
+**Weapons you buy stay in your rack.** Once paid for, a weapon is yours for the
+session and switching back to it is free — buying a second weapon never destroys
+the first.
+
+**One Run Ticket is always held back.** The Armory can never spend the last RF
+needed for a ticket, so you cannot buy yourself into a state where you can no
+longer afford to play and earn more.
+
+**Everything you buy is drawn on the Friend**, so the loadout is visible in the
+arena: hull plating adds a gold-rimmed armoured chassis that thickens per level,
+thrusters add nozzles below with live exhaust that lengthens as you move, the
+magnet coil draws its real pickup radius as a dashed ring, the power core is a
+pulsing chest emitter, and the equipped weapon sits on a shoulder turret with a
+muzzle flash on every volley.
 
 | Weapon | Cost | Behaviour |
 | --- | --- | --- |
@@ -123,8 +142,15 @@ Verified in the SDK v0.1.4 checkout:
 - Armory, Pilot profile, level-up overlay, Odds, Vault and Settings all
   exercised; a weapon purchase was confirmed to move the balance from 19 RF to
   15 RF.
-- Audio verified in the harness: the kit starts unmuted and an `AudioContext`
-  reaches `running` on the first gesture.
+- Audio verified in the harness: the kit starts unmuted, an `AudioContext`
+  reaches `running` on the first gesture, and audio sources are counted starting
+  during live play (13 sources in one short run) — not just on menu actions.
+- Armory ownership verified: buying Orbiter (7 RF) then Scatter (4 RF) leaves
+  **both** owned and re-equipping Orbiter costs nothing.
+- The ticket reserve verified: the Armory blocks a purchase rather than dropping
+  the balance below the 1 RF a Run Ticket costs.
+- Layout measured at 360px: the scrolling body, the status line and the runtime
+  toolbar occupy separate bands with no overlap.
 
 Known issues and limits:
 
@@ -138,6 +164,8 @@ Known issues and limits:
 - **The Armory is a game-local RF sink.** It is not an SDK ledger action, so the
   runtime's own balance readout does not reflect the spend; the game subtracts
   its own tally for display.
+- **Purchases do not survive a reload.** Owned weapons and systems live in React
+  state only, because the sandbox exposes no storage.
 - **Narrow viewports are tight.** The arena is a fixed 960 × 640 world. On a
   phone the frame is made taller (`host.css`, 3 / 4) so the menus are comfortable,
   and the canvas letterboxes to 3:2 inside it, but the arena itself stays small.

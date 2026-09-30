@@ -19,7 +19,7 @@ type E = { x: number; y: number; vx: number; vy: number; hp: number; r: number; 
 type Warn = { x: number; y: number; t: number; k: number };
 type Sprites = Awaited<ReturnType<ReturnType<typeof createFriendReader>["read"]>>;
 type Summary = { score: number; kills: number; time: number; level: number; cleared: boolean };
-type Hooks = { paused: () => boolean; reduced: () => boolean; onLevel: (choices: Up[]) => void; onEnd: (summary: Summary) => void; cue: (cue: FriendSoundCue) => void };
+type Hooks = { paused: () => boolean; reduced: () => boolean; onLevel: (choices: Up[]) => void; onEnd: (summary: Summary) => void; cue: (cue: FriendSoundCue, volume?: number) => void };
 type Menu = "odds" | "inventory" | "settings" | null;
 type Phase = "menu" | "armory" | "pilot" | "play" | "levelup" | "chest" | "reveal";
 type Loadout = { weapon: Weapon; perks: Record<Perk, number> };
@@ -49,6 +49,7 @@ const PERKS: Record<Perk, { name: string; blurb: string; price: bigint; max: num
   core: { name: "Power core", blurb: "+12% fire rate per level", price: 3n * RF, max: 4 },
 };
 
+const PHASES: readonly (readonly [number, string])[] = [[10, "PHASE 2 · DARTERS"], [20, "PHASE 3 · BRUTES"], [38, "PHASE 4 · SWARM"]];
 const PERK_IDS = Object.keys(PERKS) as Perk[];
 const WEAPON_IDS = Object.keys(WEAPONS) as Weapon[];
 const emptyPerks = (): Record<Perk, number> => ({ hull: 0, thruster: 0, coil: 0, core: 0 });
@@ -76,7 +77,7 @@ function engine(canvas: HTMLCanvasElement, readSprites: () => Sprites | null, se
   const maxHp = 100 + loadout.perks.hull * 25;
   const p = { x: W / 2, y: H / 2, hp: maxHp, face: "down" as Face, walk: false, inv: 0, fire: 0, nova: 2, xp: 0, need: 5, lvl: 1,
     rate: weapon.rate / (1 + 0.12 * loadout.perks.core), multi: 1, speed: 215 * (1 + 0.08 * loadout.perks.thruster),
-    magnet: 110 + loadout.perks.coil * 35, pierce: 0, novaLv: 0 };
+    magnet: 110 + loadout.perks.coil * 35, pierce: 0, novaLv: 0, aim: 0, flash: 0 };
   const enemies: E[] = [], shots: E[] = [], shards: E[] = [], parts: E[] = [];
   const rings: { x: number; y: number; r: number; max: number }[] = [];
   const warns: Warn[] = [];
@@ -84,7 +85,7 @@ function engine(canvas: HTMLCanvasElement, readSprites: () => Sprites | null, se
   const orbHits = new WeakMap<E, number>();
   const cache = new Map<string, HTMLCanvasElement>();
   let t = 0, kills = 0, spawn = 0.6, shake = 0, flash = 0, waiting = false, over = false, last = 0, raf = 0;
-  let warned = false, lowHp = false;
+  let warned = false, lowHp = false, lastShot = -1, lastKill = -1, banner = "", bannerT = 0, phaseIdx = 0;
   const vignette = ctx.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, H * 0.85);
   vignette.addColorStop(0, "rgba(0,0,0,0)");
   vignette.addColorStop(1, "rgba(0,0,0,.72)");
@@ -152,6 +153,8 @@ function engine(canvas: HTMLCanvasElement, readSprites: () => Sprites | null, se
     for (let i = 0; i < drops; i++) shards.push({ x: e.x + (Math.random() - 0.5) * 16, y: e.y + (Math.random() - 0.5) * 16, vx: 0, vy: 0, hp: 0, r: 4, k: 0, life: 0, c: "#5ee7d0", s: 0, hit: 0, age: 0, ph: Math.random() * 6.28 });
     burst(e.x, e.y, e.k === 2 ? 26 : 12, e.c, 240);
     shake = Math.min(shake + (e.k === 2 ? 7 : 1.6), 12);
+    // Throttled so a swarm wipe does not turn into a wall of noise.
+    if (t - lastKill > 0.07) { lastKill = t; hooks.cue("impact", 0.3); }
   };
 
   const update = (dt: number) => {
@@ -170,6 +173,12 @@ function engine(canvas: HTMLCanvasElement, readSprites: () => Sprites | null, se
       p.face = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? "left" : "right") : dy < 0 ? "up" : "down";
     }
     p.inv = Math.max(0, p.inv - dt); flash = Math.max(0, flash - dt);
+    p.flash = Math.max(0, p.flash - dt);
+    bannerT = Math.max(0, bannerT - dt);
+    while (phaseIdx < PHASES.length && t >= PHASES[phaseIdx][0]) {
+      banner = PHASES[phaseIdx][1]; bannerT = 1.8; phaseIdx++;
+      hooks.cue("anticipation");
+    }
     spawn -= dt;
     if (spawn <= 0) { spawn = Math.max(0.2, 0.95 - t * 0.0105); for (let i = 0; i < (t > 38 ? 2 : 1); i++) queueSpawn(); }
     for (let i = warns.length - 1; i >= 0; i--) { warns[i].t -= dt; if (warns[i].t <= 0) { hatch(warns[i]); warns.splice(i, 1); } }
@@ -185,6 +194,9 @@ function engine(canvas: HTMLCanvasElement, readSprites: () => Sprites | null, se
       if (best) {
         p.fire = p.rate;
         const base = Math.atan2(best.y - p.y, best.x - p.x);
+        p.aim = base; p.flash = 0.07;
+        // A shot you can hear, at a rate that stays readable instead of buzzing.
+        if (t - lastShot > 0.085) { lastShot = t; hooks.cue("select", 0.3); }
         const count = weapon.shots + p.multi - 1;
         const step = weapon.shots > 1 ? weapon.spread : 0.17;
         for (let i = 0; i < count; i++) {
@@ -327,6 +339,109 @@ function engine(canvas: HTMLCanvasElement, readSprites: () => Sprites | null, se
     ctx.restore();
   };
 
+  const rr = (x: number, y: number, w: number, h: number, r: number) => {
+    const rad = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rad, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rad);
+    ctx.arcTo(x + w, y + h, x, y + h, rad);
+    ctx.arcTo(x, y + h, x, y, rad);
+    ctx.arcTo(x, y, x + w, y, rad);
+    ctx.closePath();
+  };
+
+  /** Anything bought in the Armory is drawn on the Friend, so the loadout is visible in play. */
+  const drawRigBehind = (now: number) => {
+    const perks = loadout.perks;
+    // Magnet coil: a dashed ring at the real pickup radius, so the upgrade is legible.
+    if (perks.coil > 0) {
+      ctx.save();
+      ctx.globalAlpha = 0.13 + 0.05 * Math.sin(now / 420);
+      ctx.strokeStyle = "#5ee7d0"; ctx.lineWidth = 1.5;
+      ctx.setLineDash([7, 11]); ctx.lineDashOffset = -now / 35;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.magnet, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+    }
+    // Thruster: nozzles below the Friend, with a soft teardrop exhaust that lengthens on the move.
+    if (perks.thruster > 0) {
+      const thrust = p.walk ? 1 : 0.3;
+      ctx.save();
+      for (const side of [-1, 1]) {
+        const nx = p.x + side * 15, ny = p.y + 18;
+        const len = 13 + perks.thruster * 4 * thrust + Math.sin(now / 45 + side) * 3 * thrust;
+        const grad = ctx.createLinearGradient(nx, ny + 5, nx, ny + 5 + len);
+        grad.addColorStop(0, "rgba(255,236,190,.95)");
+        grad.addColorStop(0.45, "rgba(255,170,70,.7)");
+        grad.addColorStop(1, "rgba(255,90,40,0)");
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.moveTo(nx - 4.5, ny + 5);
+        ctx.quadraticCurveTo(nx - 2, ny + 5 + len * 0.6, nx, ny + 5 + len);
+        ctx.quadraticCurveTo(nx + 2, ny + 5 + len * 0.6, nx + 4.5, ny + 5);
+        ctx.closePath(); ctx.fill();
+        ctx.fillStyle = "#20242e"; ctx.strokeStyle = "#d8b26a"; ctx.lineWidth = 1.6;
+        rr(nx - 5, ny - 5, 10, 11, 3); ctx.fill(); ctx.stroke();
+      }
+      ctx.restore();
+    }
+    // Hull plating: an armoured chassis behind the Friend that thickens with each level.
+    if (perks.hull > 0) {
+      const w = 54 + perks.hull * 5, h = 50 + perks.hull * 4;
+      ctx.save();
+      ctx.fillStyle = "rgba(30,24,13,.88)";
+      ctx.strokeStyle = "rgba(216,178,106,.9)";
+      ctx.lineWidth = 2.4;
+      rr(p.x - w / 2, p.y - h / 2 - 4, w, h, 9);
+      ctx.fill(); ctx.stroke();
+      for (let i = 0; i < perks.hull; i++) {
+        const wdt = 15 - i * 1.6, py = p.y - 15 + i * 11;
+        ctx.fillStyle = "rgba(216,178,106,.95)"; ctx.strokeStyle = "#2a2210"; ctx.lineWidth = 1.3;
+        for (const side of [-1, 1]) { rr(p.x + side * (w / 2) - wdt / 2, py, wdt, 8, 3); ctx.fill(); ctx.stroke(); }
+      }
+      ctx.restore();
+    }
+  };
+
+  /** The weapon hardpoint, its muzzle flash, and the power core sit in front of the Friend. */
+  const drawRigFront = (now: number) => {
+    const perks = loadout.perks;
+    if (perks.core > 0) {
+      const pulse = 0.5 + 0.5 * Math.sin(now / 260);
+      ctx.save();
+      ctx.shadowColor = "#7ef9ff"; ctx.shadowBlur = 10 + perks.core * 4;
+      ctx.fillStyle = "#d8fdff";
+      ctx.beginPath(); ctx.arc(p.x, p.y + 3, 2.2 + perks.core * 0.7 + pulse * 0.9, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+    // Fixed shoulder mount so it never collides with the thrusters; the barrel still tracks the aim.
+    ctx.save();
+    ctx.translate(p.x + 24, p.y - 14);
+    ctx.fillStyle = "#20242e"; ctx.strokeStyle = "#d8b26a"; ctx.lineWidth = 1.8;
+    ctx.beginPath(); ctx.arc(0, 0, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.rotate(p.aim);
+    ctx.fillStyle = "#20242e"; ctx.strokeStyle = weapon.tint; ctx.lineWidth = 1.8; ctx.lineJoin = "round";
+    if (loadout.weapon === "scatter") {
+      for (const a of [-0.3, 0, 0.3]) { ctx.save(); ctx.rotate(a); rr(9, -3, 19, 6, 2); ctx.fill(); ctx.stroke(); ctx.restore(); }
+    } else if (loadout.weapon === "lance") {
+      rr(6, -2.5, 32, 5, 2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = weapon.tint; ctx.beginPath(); ctx.arc(38, 0, 3, 0, Math.PI * 2); ctx.fill();
+    } else if (loadout.weapon === "orbiter") {
+      rr(6, -5, 15, 10, 4); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = "#9ef7ff"; ctx.lineWidth = 2;
+      for (const side of [-1, 1]) { ctx.beginPath(); ctx.moveTo(3, side * 7); ctx.lineTo(17, side * 12); ctx.stroke(); }
+    } else {
+      rr(6, -3.5, 24, 7, 3); ctx.fill(); ctx.stroke();
+    }
+    if (p.flash > 0) {
+      const k = p.flash / 0.07;
+      const len = loadout.weapon === "lance" ? 42 : 30;
+      ctx.globalAlpha = k;
+      ctx.fillStyle = "#fff6d8"; ctx.shadowColor = weapon.tint; ctx.shadowBlur = 22;
+      ctx.beginPath(); ctx.moveTo(len, 0); ctx.lineTo(len - 13, -9 * k); ctx.lineTo(len - 4, 0); ctx.lineTo(len - 13, 9 * k); ctx.closePath(); ctx.fill();
+    }
+    ctx.restore();
+  };
+
   const draw = (now: number) => {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = "#07080c"; ctx.fillRect(0, 0, W, H);
@@ -364,10 +479,12 @@ function engine(canvas: HTMLCanvasElement, readSprites: () => Sprites | null, se
     const blink = p.inv > 0 && Math.floor(now / 70) % 2 === 0;
     ctx.imageSmoothingEnabled = false;
     ctx.fillStyle = "rgba(0,0,0,.45)"; ctx.beginPath(); ctx.ellipse(p.x, p.y + 26, 22, 7, 0, 0, Math.PI * 2); ctx.fill();
+    drawRigBehind(now);
     ctx.globalAlpha = blink ? 0.35 : 1; ctx.shadowColor = flash > 0 ? "#ff6b7a" : "#5ee7d0"; ctx.shadowBlur = 20;
     if (frame) ctx.drawImage(frame, p.x - 32, p.y - 40, 64, 64);
     else { ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(p.x, p.y - 8, 16, 0, Math.PI * 2); ctx.fill(); }
     ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+    drawRigFront(now);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = vignette; ctx.fillRect(0, 0, W, H);
     if (flash > 0) { ctx.fillStyle = `rgba(255,60,80,${flash * 0.6})`; ctx.fillRect(0, 0, W, H); }
@@ -384,6 +501,14 @@ function engine(canvas: HTMLCanvasElement, readSprites: () => Sprites | null, se
     ctx.textAlign = "left"; ctx.font = "600 13px ui-sans-serif,system-ui,sans-serif";
     ctx.fillStyle = "rgba(216,178,106,.75)";
     ctx.fillText(weapon.name.toUpperCase(), 26, 54);
+    if (bannerT > 0) {
+      const k = Math.min(1, bannerT / 0.5);
+      ctx.globalAlpha = k;
+      ctx.textAlign = "center"; ctx.font = "800 34px ui-sans-serif,system-ui,sans-serif";
+      ctx.fillStyle = "#d8b26a"; ctx.shadowColor = "#d8b26a"; ctx.shadowBlur = 26;
+      ctx.fillText(banner, W / 2, H / 2 - 120);
+      ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+    }
   };
 
   const loop = (now: number) => {
@@ -439,6 +564,8 @@ export default function Overdrive({ friendId, client, paused }: GameComponentPro
   const [reduced, setReduced] = useState(false);
   const [sprites, setSprites] = useState<Sprites | null>(null);
   const [loadout, setLoadout] = useState<Loadout>({ weapon: "blaster", perks: emptyPerks() });
+  // Weapons are owned once bought, so a purchase is never lost by equipping something else.
+  const [ownedWeapons, setOwnedWeapons] = useState<Weapon[]>(["blaster"]);
   const [shopSpent, setShopSpent] = useState(0n);
   const [stats, setStats] = useState<Stats>({ runs: 0, kills: 0, best: 0, bestRank: "—", rfSpent: 0n, rfEarned: 0n, caches: 0n });
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -453,6 +580,10 @@ export default function Overdrive({ friendId, client, paused }: GameComponentPro
   const definition = client.definition;
   const day = useMemo(() => Math.floor(Date.now() / 86400000), []);
   const available = snapshot ? snapshot.rfBalance - shopSpent : 0n;
+  // The Armory may never take the last RF needed for a Run Ticket, otherwise a
+  // player can spend themselves into a state where they cannot play to earn more.
+  const ticketPrice = definition.price;
+  const armoryBudget = available > ticketPrice ? available - ticketPrice : 0n;
 
   useEffect(() => {
     const version = ++epoch.current;
@@ -484,7 +615,7 @@ export default function Overdrive({ friendId, client, paused }: GameComponentPro
     const game = engine(canvas.current, () => spritesRef.current, day * 2654435761 + runId, loadout, {
       paused: () => live.current.paused,
       reduced: () => live.current.reduced,
-      cue: cue => sound.current?.play(cue),
+      cue: (cue, volume) => sound.current?.play(cue, volume === undefined ? undefined : { volume }),
       onLevel: list => { setChoices(list); setPhase("levelup"); },
       onEnd: done => {
         setSummary(done);
@@ -527,18 +658,27 @@ export default function Overdrive({ friendId, client, paused }: GameComponentPro
   }
 
   const buyWeapon = (id: Weapon) => {
-    const price = WEAPONS[id].price;
-    if (loadout.weapon === id || price > available) return;
+    const w = WEAPONS[id];
+    if (loadout.weapon === id) return;
+    if (ownedWeapons.includes(id)) {
+      // Already paid for: switching back is free.
+      sound.current?.play("select");
+      setLoadout(prev => ({ ...prev, weapon: id }));
+      setMessage(`${w.name} equipped. No further spend.`);
+      return;
+    }
+    if (w.price > armoryBudget) return;
     sound.current?.play("purchase");
-    setShopSpent(s => s + price);
+    setShopSpent(s => s + w.price);
+    setOwnedWeapons(list => [...list, id]);
     setLoadout(prev => ({ ...prev, weapon: id }));
-    setStats(prev => ({ ...prev, rfSpent: prev.rfSpent + price }));
-    setMessage(`${WEAPONS[id].name} installed. Simulated ${rf(price)} spend.`);
-  };
+    setStats(prev => ({ ...prev, rfSpent: prev.rfSpent + w.price }));
+    setMessage(`${w.name} purchased and equipped. Simulated ${rf(w.price)} spend.`);
+  };             
 
   const buyPerk = (id: Perk) => {
     const perk = PERKS[id], level = loadout.perks[id];
-    if (level >= perk.max || perk.price > available) return;
+    if (level >= perk.max || perk.price > armoryBudget) return;
     sound.current?.play("purchase");
     setShopSpent(s => s + perk.price);
     setLoadout(prev => ({ ...prev, perks: { ...prev.perks, [id]: level + 1 } }));
@@ -649,26 +789,38 @@ export default function Overdrive({ friendId, client, paused }: GameComponentPro
       {phase === "armory" && (
         <div className="od-screen">
           <header className="od-top">
-            <span className="od-chip">Armory · {rf(available)} available</span>
+            <span className="od-chip">Armory · {rf(armoryBudget)} spendable</span>
             <button type="button" onClick={() => { sound.current?.play("select"); setPhase("menu"); }}>Back</button>
           </header>
           <div className="od-scroll">
-            <p className="od-note">Every purchase is a <b>simulated RF spend</b> from this preview balance. Upgrades last for this session only — the sandbox has no save API, so nothing persists across a reload.</p>
+            <p className="od-note">Every purchase is a <b>simulated RF spend</b> from this preview balance. One Run Ticket ({rf(ticketPrice)}) is always held back so you can never spend yourself out of playing. Upgrades last for this session only — the sandbox has no save API, so nothing persists across a reload.</p>
             <h3 className="od-sub">Weapons</h3>
             {WEAPON_IDS.map(id => {
-              const w = WEAPONS[id], owned = loadout.weapon === id, locked = w.price > available && !owned;
+              const w = WEAPONS[id];
+              const equipped = loadout.weapon === id, has = ownedWeapons.includes(id);
+              const locked = !has && w.price > armoryBudget;
+              const stats = [
+                `${(1 / w.rate).toFixed(1)}/s`,
+                w.shots > 1 ? `${w.shots} pellets` : null,
+                w.pierce > 0 ? `pierce ${w.pierce}` : null,
+                w.orbs > 0 ? `${w.orbs} drones` : null,
+              ].filter(Boolean).join(" · ");
               return (
-                <div className={`od-item${owned ? " od-owned" : ""}`} key={id}>
-                  <span><strong>{w.name}</strong><small>{w.blurb} · {w.price === 0n ? "free" : rf(w.price)}</small></span>
-                  <button type="button" disabled={owned || locked || busy || paused} onClick={() => buyWeapon(id)}>
-                    {owned ? "Equipped" : locked ? "Need RF" : `Install · ${rf(w.price)}`}
+                <div className={`od-item${equipped ? " od-owned" : ""}`} key={id}>
+                  <span>
+                    <strong>{w.name}{has && !equipped ? " · owned" : ""}</strong>
+                    <small>{w.blurb}</small>
+                    <small>{stats} · {has ? "no further spend" : rf(w.price)}</small>
+                  </span>
+                  <button type="button" disabled={equipped || locked || busy || paused} onClick={() => buyWeapon(id)}>
+                    {equipped ? "Equipped" : has ? "Equip" : locked ? "Need RF" : `Buy · ${rf(w.price)}`}
                   </button>
                 </div>
               );
             })}
             <h3 className="od-sub">Systems</h3>
             {PERK_IDS.map(id => {
-              const perk = PERKS[id], level = loadout.perks[id], maxed = level >= perk.max, locked = perk.price > available;
+              const perk = PERKS[id], level = loadout.perks[id], maxed = level >= perk.max, locked = perk.price > armoryBudget;
               return (
                 <div className={`od-item${maxed ? " od-owned" : ""}`} key={id}>
                   <span><strong>{perk.name} · Lv {level}/{perk.max}</strong><small>{perk.blurb} · {rf(perk.price)}</small></span>
@@ -678,6 +830,7 @@ export default function Overdrive({ friendId, client, paused }: GameComponentPro
                 </div>
               );
             })}
+            <p className="od-note">Weapons you buy stay in your rack — switching back is free, so nothing you paid for is lost. Every system is drawn on the Friend in the arena: plating on the shoulders, thrusters below with live exhaust, the coil as a pickup ring, and the core as a chest emitter.</p>
             <p className="od-note">Total simulated RF spent this session: <b>{rf(stats.rfSpent)}</b></p>
           </div>
           <footer className="od-foot">{feedback}</footer>
@@ -701,6 +854,7 @@ export default function Overdrive({ friendId, client, paused }: GameComponentPro
               <div className="od-stat"><b>{rf(stats.rfEarned)}</b><small>RF redeemed</small></div>
               <div className="od-stat"><b>{rf(stats.rfSpent)}</b><small>RF spent (shop)</small></div>
               <div className="od-stat"><b>{WEAPONS[loadout.weapon].name}</b><small>current weapon</small></div>
+              <div className="od-stat"><b>{ownedWeapons.length}/{WEAPON_IDS.length}</b><small>weapons owned</small></div>
             </div>
             <h3 className="od-sub">Equipped</h3>
             {PERK_IDS.map(id => (
