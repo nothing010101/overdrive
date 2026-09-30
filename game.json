@@ -1,0 +1,11 @@
+{
+  "name": "Overdrive",
+  "consumable": "Run Ticket",
+  "price": "1000000000000000000",
+  "outcomes": [
+    { "name": "Scrap cache", "chanceBps": 5500, "reward": "500000000000000000" },
+    { "name": "Copper cache", "chanceBps": 3000, "reward": "1000000000000000000" },
+    { "name": "Silicon cache", "chanceBps": 1300, "reward": "2000000000000000000" },
+    { "name": "Quantum cache", "chanceBps": 200, "reward": "3000000000000000000" }
+  ]
+}

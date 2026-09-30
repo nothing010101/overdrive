@@ -1,0 +1,9 @@
+/* Trusted runtime layout. Loaded into the host document by the CLI, never by the
+   sandboxed game child. Narrow viewports get a taller frame so the menu screens
+   are comfortable on a phone; the arena canvas letterboxes to 3:2 inside it. */
+@media (max-width: 520px) {
+  :root {
+    --rf-game-max-width: 520px;
+    --rf-game-aspect-ratio: 3 / 4;
+  }
+}
